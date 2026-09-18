@@ -5,7 +5,7 @@ import { hasApiKey, openModal as openSettingsModal } from './settings.js';
 import { tileAt } from './island-gen.js';
 import {
   genesisPrompts, midGenesisPrompts,
-  arrivalBeatPrompts, actionBeatPrompts,
+  arrivalBeatPrompts, actionBeatPrompts, rareEventBeatPrompts,
 } from './prompts.js';
 import { buildPacingBlock } from './pacing.js';
 import { worldBible } from './world.js';
@@ -22,10 +22,11 @@ import {
   getHistory, appendUser, appendAssistant, formatForPrompt, clearAll as clearHistory,
 } from './history.js';
 import {
-  movePlayer, applyBeat, checkMidGenesis, tileForDisplay, isAdjacent,
+  movePlayer, teleportPlayer, adjacentTiles, isStranded,
+  applyBeat, checkMidGenesis, tileForDisplay, isAdjacent,
   ensureLocation, isNewLocation, shouldRegenerateChoices,
   filterChoices, markChoiceTaken, rollShallowOceanEntry,
-  currentWeather, currentWeatherTomorrow, ensureWeatherForToday,
+  currentWeather, ensureWeatherForTick, hoursSinceWeatherRoll,
   applyWeatherToFires,
   gatherOptionsForTile, gatherYield,
   restBonus,
@@ -33,6 +34,11 @@ import {
   consumeFromInventory, suppliesSummary, applyStarvationDamage, autoConsume,
   buildingsOnTile,
 } from './engine.js';
+import {
+  rollRareEvent,
+  localGatherText, localCraftText, localRestText,
+  weatherDurationText,
+} from './flavour.js';
 import { showBanner, hideBanner, showLoading, hideLoading } from './net.js';
 
 let state = loadState();
@@ -96,7 +102,7 @@ function renderClock() {
   const scene = $('scene');
   if (scene) {
     scene.dataset.tod = tod;
-    scene.dataset.weather = state.weather?.today || 'clear';
+    scene.dataset.weather = state.weather?.current || 'clear';
   }
 }
 
@@ -107,9 +113,8 @@ function renderWeatherIcon() {
 }
 
 function renderWeatherPopover() {
-  ensureWeatherForToday(state);
   const wx = currentWeather(state);
-  const tw = currentWeatherTomorrow(state);
+  const hours = hoursSinceWeatherRoll(state);
 
   $('weather-icon').textContent = wx.icon;
   $('weather-name').textContent = wx.name;
@@ -124,7 +129,8 @@ function renderWeatherPopover() {
     effects.appendChild(p);
   }
 
-  $('weather-forecast').textContent = `${tw.icon} ${tw.name}`;
+  $('weather-forecast').textContent =
+    hours <= 0 ? 'just rolled' : `current conditions · ${weatherDurationText(hours)}`;
 }
 
 function setNarration(title, text) {
@@ -138,7 +144,7 @@ function renderViewport() {
 
   const cx = state.player.x;
   const cy = state.player.y;
-  const fog = state.weather?.today === 'fog';
+  const fog = state.weather?.current === 'fog';
 
   for (let dy = -1; dy <= 1; dy++) {
     for (let dx = -1; dx <= 1; dx++) {
@@ -305,7 +311,7 @@ async function runGenesis() {
   state = defaultState();
   state.worldSeed = worldSeedStr;
   state.totalTicks = START_TICKS;
-  ensureWeatherForToday(state);
+  ensureWeatherForTick(state);
 
   const { system, user } = genesisPrompts();
 
@@ -394,7 +400,6 @@ async function runBeat(action, opts = {}) {
 
   const loc = getLocation(state, state.player.x, state.player.y);
   const wx = currentWeather(state);
-  const tw = currentWeatherTomorrow(state);
 
   const locationContext = {
     name: state.currentLocationName,
@@ -404,17 +409,26 @@ async function runBeat(action, opts = {}) {
     permanentFacts: loc?.permanentFacts || [],
     log: (loc?.log || []).slice(-6),
     recentTiles: state.recentTiles || [],
+    adjacentTiles: adjacentTiles(state),
+    stranded: isStranded(state),
     weatherInfo: {
-      today: wx.name,
-      todayId: wx.id,
+      current: wx.name,
+      currentId: wx.id,
       effects: wx.effects.map(e => e.text),
-      tomorrow: tw.name,
+      hoursLasted: hoursSinceWeatherRoll(state),
     },
   };
 
   const historyStr = formatForPrompt(getHistory());
 
-  const promptBuilder = opts.mode === 'action' ? actionBeatPrompts : arrivalBeatPrompts;
+  let promptBuilder;
+  if (opts.mode === 'rare') {
+    promptBuilder = rareEventBeatPrompts;
+  } else if (opts.mode === 'action') {
+    promptBuilder = actionBeatPrompts;
+  } else {
+    promptBuilder = arrivalBeatPrompts;
+  }
 
   const { system, user } = promptBuilder({
     worldSeed: state.islandSeed,
@@ -422,7 +436,7 @@ async function runBeat(action, opts = {}) {
       day: getDay(state),
       hour: getHour(state),
       timeOfDay: getTimeOfDay(state),
-      weather: state.weather?.today,
+      weather: state.weather?.current,
       stats: state.stats,
       inventory: state.inventory,
       tools: state.tools,
@@ -446,7 +460,7 @@ async function runBeat(action, opts = {}) {
         { role: 'user',   content: user },
       ],
       jsonMode: true, jsonFallback: true,
-      maxTokens: opts.mode === 'action' ? 600 : 2000,
+      maxTokens: opts.mode === 'arrival' ? 2000 : 600,
       temperature: 0.85,
     });
 
@@ -455,8 +469,9 @@ async function runBeat(action, opts = {}) {
     appendAssistant(JSON.stringify(beat));
     pushGameHistory(state, 'gm', beat.narration || '');
     markHistorySeen(state);
+    state.pendingWeatherChange = null;   // consumed
 
-    if (Array.isArray(beat.choices) && opts.mode !== 'action') {
+    if (Array.isArray(beat.choices) && opts.mode === 'arrival') {
       const curLoc = ensureLocation(state, state.player.x, state.player.y);
       curLoc.choices = beat.choices.slice(0, 3);
       curLoc.generatedAtTick = state.totalTicks;
@@ -493,10 +508,11 @@ async function runBeat(action, opts = {}) {
 
 function formatAction(action) {
   if (typeof action === 'string') return action;
-  if (action.type === 'move')    return `I move to (${action.x}, ${action.y}).`;
-  if (action.type === 'arrive')  return `I arrive at (${action.x}, ${action.y}). What do I see?`;
-  if (action.type === 'choice')  return `I choose: ${action.label}${action.hours ? ` (${action.hours} hours)` : ''}.`;
-  if (action.type === 'bar')     return `I ${action.action}${action.hours ? ` for ${action.hours} hours` : ''}.`;
+  if (action.type === 'move')     return `I move to (${action.x}, ${action.y}) — ${action.direction || 'unknown direction'}.`;
+  if (action.type === 'arrive')   return `I arrive at (${action.x}, ${action.y}). What do I see?`;
+  if (action.type === 'teleport') return `I was forcibly moved to (${action.x}, ${action.y}). Reason: ${action.reason || 'unknown'}.`;
+  if (action.type === 'choice')   return `I choose: ${action.label}${action.hours ? ` (${action.hours} hours)` : ''}.`;
+  if (action.type === 'bar')      return `I ${action.action}${action.hours ? ` for ${action.hours} hours` : ''}.`;
   return JSON.stringify(action);
 }
 
@@ -561,21 +577,14 @@ async function onTileTap(x, y) {
     return;
   }
 
-  const beforeDay = getDay(state);
   const move = movePlayer(state, x, y);
   if (!move.ok) return;
 
-  const afterDay = getDay(state);
-  if (afterDay !== beforeDay) {
-    ensureWeatherForToday(state);
-    const removed = applyWeatherToFires(state);
-    if (removed.length) {
-      console.log('[weather] fires went out:', removed);
-    }
-  }
+  applyWeatherToFires(state);
 
   pushRecentTile(state, x, y, null);
-  pushGameHistory(state, 'player', `Moved to (${x}, ${y})`);
+  pushGameHistory(state, 'player',
+    `Moved ${move.direction} to (${x}, ${y}) [${move.biome}]`);
 
   renderStats();
   renderClock();
@@ -601,7 +610,7 @@ async function onTileTap(x, y) {
 
   if (needsRegen) {
     await runBeat(
-      { type: 'arrive', x, y },
+      { type: 'arrive', x, y, direction: move.direction },
       { isNewLocation: isNew, cachedChoices: loc.choices || null, mode: 'arrival' }
     );
   } else {
@@ -622,6 +631,9 @@ async function onChoiceTap(choice) {
     pushGameHistory(state, 'player', `Chose: ${choice.label}`);
 
     let movedByChoice = false;
+    let movedByForce  = false;
+    let moveDirection = null;
+
     if (choice.moves_to && typeof choice.moves_to.x === 'number') {
       const nx = choice.moves_to.x;
       const ny = choice.moves_to.y;
@@ -629,16 +641,32 @@ async function onChoiceTap(choice) {
         const m = movePlayer(state, nx, ny);
         if (m.ok) {
           movedByChoice = true;
+          moveDirection = m.direction;
           pushRecentTile(state, nx, ny, null);
-          pushGameHistory(state, 'player', `Moved to (${nx}, ${ny})`);
+          pushGameHistory(state, 'player',
+            `Walked ${m.direction} to (${nx}, ${ny}) [${m.biome}]`);
           renderViewport();
           renderClock();
-          const afterDay = getDay(state);
-          if (afterDay !== state.weatherDay) ensureWeatherForToday(state);
         }
+      } else {
+        console.warn('moves_to not adjacent:', nx, ny);
       }
+    } else if (choice.forced_move_to && typeof choice.forced_move_to.x === 'number') {
+      const nx = choice.forced_move_to.x;
+      const ny = choice.forced_move_to.y;
+      const cost = choice.costTicks || 1;
+      const t = teleportPlayer(state, nx, ny, cost);
+      movedByForce = true;
+      movedByChoice = true;
+      moveDirection = t.direction;
+      pushRecentTile(state, nx, ny, null);
+      pushGameHistory(state, 'player',
+        `Forcibly moved ${t.direction} to (${nx}, ${ny}) [${t.biome}]`);
+      renderViewport();
+      renderClock();
     } else if (choice.costTicks > 0) {
       advanceTicks(state, choice.costTicks);
+      ensureWeatherForTick(state);
       autoConsume(state);
       applyStarvationDamage(state, choice.costTicks);
       renderClock();
@@ -653,16 +681,12 @@ async function onChoiceTap(choice) {
     renderSuppliesLine();
     saveState(state);
 
-    // If the choice moved us and the destination needs choices, fire an arrival beat.
-    // Otherwise fire an action beat.
-    let mode = 'action';
-    let beatOpts = { mode };
+    let beatOpts = { mode: 'action' };
     if (movedByChoice) {
       const destLoc = ensureLocation(state, state.player.x, state.player.y);
       const isNew = isNewLocation(state, state.player.x, state.player.y);
       const needsRegen = isNew || shouldRegenerateChoices(state, state.player.x, state.player.y);
       if (needsRegen) {
-        mode = 'arrival';
         beatOpts = {
           mode: 'arrival',
           isNewLocation: isNew,
@@ -671,9 +695,13 @@ async function onChoiceTap(choice) {
       }
     }
 
-    // runBeat sets busy; we need to release our lock first.
     busy = false;
-    await runBeat({ type: 'choice', id: choice.id, label: choice.label }, beatOpts);
+
+    const actionObj = movedByForce
+      ? { type: 'teleport', x: state.player.x, y: state.player.y, reason: choice.label, direction: moveDirection }
+      : { type: 'choice', id: choice.id, label: choice.label };
+
+    await runBeat(actionObj, beatOpts);
   } finally {
     busy = false;
   }
@@ -693,11 +721,9 @@ async function onVariableChoiceTap(choice) {
   busy = true;
   try {
     openNumpad(choice.label, async (hours) => {
-      if (!hours || hours <= 0) {
-        busy = false;
-        return;
-      }
+      if (!hours || hours <= 0) { busy = false; return; }
       advanceTicks(state, hours);
+      ensureWeatherForTick(state);
       autoConsume(state);
       applyStarvationDamage(state, hours);
       renderClock();
@@ -711,15 +737,6 @@ async function onVariableChoiceTap(choice) {
     busy = false;
     throw err;
   }
-  // busy remains true until the numpad resolves; if user cancels, we release
-  // via the Cancel button handler below.
-  // Safety: if the modal closes without firing confirm, we release via a
-  // microtask. Simplest: rely on Cancel button calling closeNumpad.
-}
-
-// Release busy when the numpad is dismissed without confirming.
-function watchNumpadCancel(prevConfirm) {
-  // Called once from wireNumpad
 }
 
 // ---------------------------------------------------------------
@@ -741,7 +758,6 @@ function closeNumpad() {
   $('numpad-modal').classList.add('hidden');
   numpadValue = '';
   numpadConfirm = null;
-  // If we were awaiting a variable choice, release the lock.
   if (busy) busy = false;
 }
 
@@ -760,12 +776,7 @@ function wireNumpad() {
   $('btn-numpad-confirm').addEventListener('click', async () => {
     const hours = parseInt(numpadValue || '0', 10);
     const fn = numpadConfirm;
-    // Don't null out confirm until we've called it
-    if (!fn || hours <= 0) {
-      closeNumpad();
-      return;
-    }
-    // Hide the modal without triggering the busy-release path in closeNumpad
+    if (!fn || hours <= 0) { closeNumpad(); return; }
     $('numpad-modal').classList.add('hidden');
     numpadValue = '';
     numpadConfirm = null;
@@ -858,6 +869,7 @@ async function doGather(opt, hours) {
   try {
     const result = gatherYield(state, opt.id, hours);
     advanceTicks(state, hours);
+    ensureWeatherForTick(state);
     autoConsume(state);
     applyStarvationDamage(state, hours);
 
@@ -871,24 +883,39 @@ async function doGather(opt, hours) {
     pushGameHistory(state, 'player',
       `Gathered ${opt.name} for ${hours}h. Found ${result.qty}.`);
 
+    const wx = currentWeather(state);
+    const tod = getTimeOfDay(state);
+
+    // Rare event overrides local text.
+    if (rollRareEvent(opt.id)) {
+      busy = false;
+      await runBeat(
+        {
+          type: 'bar', action: 'gather',
+          resource: opt.id, resourceName: opt.name,
+          hours, qty: result.qty,
+        },
+        { mode: 'rare', loadingText: 'Something stirs…' }
+      );
+      return;
+    }
+
+    // Local narration.
+    const text = localGatherText({
+      weather: wx.id,
+      timeOfDay: tod,
+      hours,
+      qty: result.qty,
+      resource: opt.name,
+    });
+    setNarration(state.currentLocationName, text);
+    pushGameHistory(state, 'gm', text);
+    markHistorySeen(state);
+
     renderStats();
     renderClock();
     renderSuppliesLine();
     saveState(state);
-
-    busy = false;
-
-    await runBeat(
-      {
-        type: 'bar',
-        action: 'gather',
-        resource: opt.id,
-        resourceName: opt.name,
-        hours,
-        qty: result.qty,
-      },
-      { mode: 'action', loadingText: 'Gathering…' }
-    );
   } finally {
     busy = false;
   }
@@ -968,18 +995,9 @@ function openCraftModal() {
       btn.appendChild(bodyEl);
 
       if (check.ok) {
-        btn.addEventListener('click', () => {
+        btn.addEventListener('click', async () => {
           $('craft-modal').classList.add('hidden');
-          const result = craftRecipe(state, r.id);
-          if (result.ok) {
-            renderStats();
-            renderClock();
-            renderViewport();
-            renderCampLine();
-            renderSuppliesLine();
-            saveState(state);
-            setNarration(state.currentLocationName, `You made a ${r.name}.`);
-          }
+          await doCraft(r);
         });
       }
 
@@ -988,6 +1006,52 @@ function openCraftModal() {
   }
 
   $('craft-modal').classList.remove('hidden');
+}
+
+async function doCraft(r) {
+  if (busy) return;
+  busy = true;
+  try {
+    const result = craftRecipe(state, r.id);
+    if (!result.ok) { busy = false; return; }
+
+    pushGameHistory(state, 'player', `Crafted ${r.name}`);
+
+    // Rare event check
+    if (rollRareEvent('craft')) {
+      busy = false;
+      await runBeat(
+        {
+          type: 'bar', action: 'craft',
+          item: r.id, itemName: r.name,
+          hours: r.costTicks || 1,
+        },
+        { mode: 'rare', loadingText: 'Something stirs…' }
+      );
+      return;
+    }
+
+    const wx = currentWeather(state);
+    const tod = getTimeOfDay(state);
+    const text = localCraftText({
+      weather: wx.id,
+      timeOfDay: tod,
+      hours: r.costTicks || 1,
+      item: r.name,
+    });
+    setNarration(state.currentLocationName, text);
+    pushGameHistory(state, 'gm', text);
+    markHistorySeen(state);
+
+    renderStats();
+    renderClock();
+    renderViewport();
+    renderCampLine();
+    renderSuppliesLine();
+    saveState(state);
+  } finally {
+    busy = false;
+  }
 }
 
 // ---------------------------------------------------------------
@@ -1263,6 +1327,7 @@ function wireActionBar() {
           try {
             const bonus = restBonus(state, state.player.x, state.player.y);
             advanceTicks(state, hours);
+            ensureWeatherForTick(state);
             const hpGain = bonus.hpPerHour * hours;
             const moGain = bonus.moralePerHour * hours;
             const waGain = bonus.waterPerHour * hours;
@@ -1282,11 +1347,23 @@ function wireActionBar() {
             renderClock();
             renderSuppliesLine();
             saveState(state);
-            busy = false;
-            await runBeat(
-              { type: 'bar', action, hours },
-              { mode: 'action', loadingText: 'Resting…' }
-            );
+
+            if (rollRareEvent('rest')) {
+              busy = false;
+              await runBeat(
+                { type: 'bar', action, hours },
+                { mode: 'rare', loadingText: 'Something stirs…' }
+              );
+              return;
+            }
+
+            const wx = currentWeather(state);
+            const tod = getTimeOfDay(state);
+            const text = localRestText({ weather: wx.id, timeOfDay: tod, hours });
+            setNarration(state.currentLocationName, text);
+            pushGameHistory(state, 'gm', text);
+            markHistorySeen(state);
+            saveState(state);
           } finally {
             busy = false;
           }
@@ -1311,9 +1388,7 @@ function handleError(err) {
     else if (err.code === 'PARSE') msg = 'Invalid JSON from model. Retry?';
     else msg = err.message || msg;
   }
-  showBanner(msg, () => {
-    hideBanner();
-  });
+  showBanner(msg, () => { hideBanner(); });
 }
 
 // ---------------------------------------------------------------
@@ -1364,17 +1439,12 @@ document.addEventListener('DOMContentLoaded', () => {
         .catch(err => { genesisError = err; setManualReady(); });
 
       openManual(async () => {
-        if (genesisError) {
-          handleError(genesisError);
-          return;
-        }
-        if (!genesisDone) {
-          await genesisPromise;
-        }
+        if (genesisError) { handleError(genesisError); return; }
+        if (!genesisDone) await genesisPromise;
       });
     });
   } else {
-    ensureWeatherForToday(state);
+    ensureWeatherForTick(state);
     renderStats();
     renderClock();
     renderWeatherIcon();

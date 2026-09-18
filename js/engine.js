@@ -1,7 +1,7 @@
 // engine.js — game rules. No DOM. No network.
 
 import { tileAt } from './island-gen.js';
-import { weatherData, weatherForDay } from './weather.js';
+import { weatherData, weatherForTick } from './weather.js';
 import { worldBible } from './world.js';
 import {
   applyDelta, revealAround, markVisited, setTileInCache,
@@ -13,24 +13,100 @@ import { shouldFireMidGenesis } from './pacing.js';
 
 // ---------- weather ----------
 
-export function ensureWeatherForToday(state) {
-  const day = getDay(state);
-  if (state.weatherDay === day && state.weather?.today) return;
+/**
+ * Called after every tick advance. If the current weather has expired,
+ * rolls a new one and sets state.pendingWeatherChange.
+ */
+export function ensureWeatherForTick(state) {
+  if (!state.weather) {
+    state.weather = {
+      current: 'clear',
+      expiresAtTick: state.totalTicks + 12,
+      rolledAtTick: state.totalTicks,
+    };
+    state.pendingWeatherChange = null;
+    return { changed: false };
+  }
+
+  if (state.totalTicks < state.weather.expiresAtTick) {
+    return { changed: false };
+  }
+
+  const prev = state.weather.current;
+  const next = weatherForTick(state.totalTicks, state.worldSeed);
+  const duration = weatherDuration(next, state.totalTicks, state.worldSeed);
+
   state.weather = {
-    today: weatherForDay(day, state.worldSeed),
-    tomorrow: weatherForDay(day + 1, state.worldSeed),
+    current: next,
+    expiresAtTick: state.totalTicks + duration,
+    rolledAtTick: state.totalTicks,
   };
-  state.weatherDay = day;
+
+  if (prev !== next) {
+    state.pendingWeatherChange = {
+      from: prev,
+      to: next,
+      atTick: state.totalTicks,
+    };
+    return { changed: true, from: prev, to: next };
+  }
+  return { changed: false };
 }
 
 export function currentWeather(state) {
-  ensureWeatherForToday(state);
-  return weatherData(state.weather.today);
+  return weatherData(state.weather?.current || 'clear');
 }
 
-export function currentWeatherTomorrow(state) {
-  ensureWeatherForToday(state);
-  return weatherData(state.weather.tomorrow);
+export function hoursSinceWeatherRoll(state) {
+  if (!state.weather) return 0;
+  return Math.max(0, state.totalTicks - state.weather.rolledAtTick);
+}
+
+// ---------- compass ----------
+
+const DIRECTIONS = [
+  ['north',     0, -1],
+  ['northeast', 1, -1],
+  ['east',      1,  0],
+  ['southeast', 1,  1],
+  ['south',     0,  1],
+  ['southwest',-1,  1],
+  ['west',     -1,  0],
+  ['northwest',-1, -1],
+];
+
+export function adjacentTiles(state) {
+  const out = {};
+  for (const [dir, dx, dy] of DIRECTIONS) {
+    const x = state.player.x + dx;
+    const y = state.player.y + dy;
+    const t = tileAt(x, y, state.worldSeed);
+    const cached = state.tiles[`${x},${y}`];
+    out[dir] = {
+      x, y,
+      biome: t.biome,
+      passable: t.passable,
+      name: cached?.name || null,
+    };
+  }
+  return out;
+}
+
+export function directionFromTo(fromX, fromY, toX, toY) {
+  const dx = Math.sign(toX - fromX);
+  const dy = Math.sign(toY - fromY);
+  const found = DIRECTIONS.find(([_, ddx, ddy]) => ddx === dx && ddy === dy);
+  return found ? found[0] : 'unknown';
+}
+
+export function isStranded(state) {
+  const here = tileAt(state.player.x, state.player.y, state.worldSeed);
+  if (here.passable) return false;
+  const adj = adjacentTiles(state);
+  for (const dir of Object.keys(adj)) {
+    if (adj[dir].passable) return false;
+  }
+  return true;
 }
 
 // ---------- moves ----------
@@ -49,6 +125,12 @@ export function canMoveTo(state, tx, ty) {
 export function movePlayer(state, tx, ty) {
   const tile = tileAt(tx, ty, state.worldSeed);
   if (!tile.passable) return { ok: false, reason: 'impassable' };
+  if (!isAdjacent(state.player.x, state.player.y, tx, ty)) {
+    return { ok: false, reason: 'not_adjacent' };
+  }
+
+  const fromX = state.player.x;
+  const fromY = state.player.y;
 
   state.player.x = tx;
   state.player.y = ty;
@@ -70,10 +152,42 @@ export function movePlayer(state, tx, ty) {
 
   const cost = wx.movementCost;
   advanceTicks(state, cost);
+  ensureWeatherForTick(state);
   autoConsume(state);
   applyStarvationDamage(state, cost);
 
-  return { ok: true, biome: tile.biome, weather: wx.id, cost };
+  const direction = directionFromTo(fromX, fromY, tx, ty);
+
+  return { ok: true, biome: tile.biome, weather: wx.id, cost, direction };
+}
+
+export function teleportPlayer(state, tx, ty, costTicks = 1) {
+  const fromX = state.player.x;
+  const fromY = state.player.y;
+  const tile = tileAt(tx, ty, state.worldSeed);
+
+  state.player.x = tx;
+  state.player.y = ty;
+
+  markVisited(state, tx, ty);
+  revealAround(state, tx, ty, 1);
+
+  setTileInCache(state, tx, ty, { biome: tile.biome });
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const nx = tx + dx, ny = ty + dy;
+      const nt = tileAt(nx, ny, state.worldSeed);
+      setTileInCache(state, nx, ny, { biome: nt.biome });
+    }
+  }
+
+  advanceTicks(state, Math.max(1, costTicks | 0));
+  ensureWeatherForTick(state);
+  autoConsume(state);
+  applyStarvationDamage(state, costTicks);
+
+  const direction = directionFromTo(fromX, fromY, tx, ty);
+  return { ok: true, biome: tile.biome, direction };
 }
 
 // ---------- fire survival ----------
@@ -244,6 +358,7 @@ export function craftRecipe(state, recipeId) {
   }
 
   advanceTicks(state, r.costTicks || 1);
+  ensureWeatherForTick(state);
   autoConsume(state);
   applyStarvationDamage(state, r.costTicks || 1);
 
@@ -281,12 +396,10 @@ export function bestConsumable(state, category) {
 
 export function autoConsume(state) {
   const THRESHOLD = 35;
-
   if (state.stats.food < THRESHOLD) {
     const best = bestConsumable(state, 'food');
     if (best) consumeOne(state, best);
   }
-
   if (state.stats.water < THRESHOLD) {
     const best = bestConsumable(state, 'water');
     if (best) consumeOne(state, best);
@@ -295,7 +408,6 @@ export function autoConsume(state) {
 
 function consumeOne(state, pick) {
   const id = pick.id;
-
   if (pick.kind === 'resource') {
     state.inventory[id] = Math.max(0, (state.inventory[id] || 0) - 1);
     const edible = pick.def.edible || {};
@@ -315,8 +427,7 @@ function consumeOne(state, pick) {
     state.craftedItems[id] = Math.max(0, (state.craftedItems[id] || 0) - 1);
     const effects = pick.def.effects?.consumable || {};
     applyDelta(state, effects);
-    // Pick the right verb: bandages are used, food is eaten
-    const verb = effects.food ? 'Ate' : effects.health ? 'Used' : 'Used';
+    const verb = effects.food ? 'Ate' : 'Used';
     pushGameHistory(state, 'player', `${verb} ${pick.def.name}.`);
   }
 }
@@ -362,7 +473,6 @@ export function consumeFromInventory(state, kind, id) {
 export function suppliesSummary(state) {
   const foods = [];
   const waters = [];
-
   for (const r of worldBible.resources) {
     if (!r.edible) continue;
     const n = state.inventory[r.id] || 0;
@@ -376,7 +486,6 @@ export function suppliesSummary(state) {
     if (n <= 0) continue;
     if (c.effects?.consumable?.food) foods.push({ glyph: c.glyph, name: c.name, count: n });
   }
-
   return { foods, waters };
 }
 
@@ -468,7 +577,7 @@ export function filterChoices(state, loc) {
   if (!loc || !Array.isArray(loc.choices)) return [];
   const day = getDay(state);
   const tod = getTimeOfDay(state);
-  const wx = state.weather?.today || 'clear';
+  const wx = state.weather?.current || 'clear';
 
   const out = [];
   for (const c of loc.choices) {

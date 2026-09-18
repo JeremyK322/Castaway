@@ -1,11 +1,11 @@
 // state.js — game state. Save/load via localStorage.
 
-const SAVE_KEY   = 'castaway.state.v5';
-const HISTORY_KEY = 'castaway.history.v5';
+const SAVE_KEY   = 'castaway.state.v6';
+const HISTORY_KEY = 'castaway.history.v6';
 
 export function defaultState() {
   return {
-    version: 5,
+    version: 6,
     started: false,
     worldSeed: null,
     islandSeed: null,
@@ -35,8 +35,15 @@ export function defaultState() {
     maxRadius: 0,
     currentBeatType: null,
     currentLocationName: 'The Wreck Beach',
-    weather: { today: 'clear', tomorrow: 'clear' },
-    weatherDay: 1,
+
+    // Weather is now tick-based, not day-based
+    weather: {
+      current: 'clear',
+      expiresAtTick: 12,
+      rolledAtTick: 0,
+    },
+    pendingWeatherChange: null,   // { from, to, atTick } — set when weather rolls, cleared after next call
+
     history: [],
     historySeenIndex: 0,
     manualSeen: false,
@@ -203,7 +210,7 @@ export function computeConditionHash(state, x, y) {
   const parts = [
     getDay(state),
     getTimeOfDay(state),
-    state.weather?.today || '',
+    state.weather?.current || '',
     state.tools.slice().sort().join(','),
     state.flags.slice().sort().join(','),
     state.worldFlags.slice().sort().join(','),
@@ -254,16 +261,12 @@ export function pushGameHistory(state, role, text) {
     text: String(text).slice(0, 400),
   });
   if (state.history.length > 400) {
-    // Trim the oldest 50 and adjust seenIndex accordingly.
     const drop = state.history.length - 400;
     state.history = state.history.slice(drop);
     state.historySeenIndex = Math.max(0, (state.historySeenIndex || 0) - drop);
   }
 }
 
-/**
- * Returns entries the LLM has not yet been told about.
- */
 export function unseenHistory(state) {
   if (!Array.isArray(state.history)) return [];
   const start = state.historySeenIndex || 0;

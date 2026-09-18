@@ -17,13 +17,21 @@ const BEAT_SCHEMA_EXAMPLE = `{
   "location": { "x": 2, "y": -1, "name": "The Drowned Jungle" },
   "beat_type": "hook",
   "choices": [
-    { "id": "a", "label": "Follow the stream north", "risk": "low",  "costTicks": 2, "moves_to": { "x": 2, "y": -2 } },
-    { "id": "b", "label": "Push deeper",             "risk": "high", "costTicks": 2, "moves_to": { "x": 3, "y": -1 } },
-    { "id": "c", "label": "Return to camp",          "risk": "none", "costTicks": 1, "moves_to": { "x": 0, "y": 0 } }
+    { "id": "a", "label": "Walk northeast into the jungle", "risk": "low",  "costTicks": 2, "moves_to": { "x": 3, "y": -2 } },
+    { "id": "b", "label": "Stay and search the undergrowth", "risk": "low", "costTicks": 2 },
+    { "id": "c", "label": "Return west to the beach",       "risk": "none", "costTicks": 1, "moves_to": { "x": 2, "y": -1 } }
   ],
   "state_delta": { "water": -5, "morale": 2 },
   "thread_progress": { "crown_of_the_god_king": "found_journal_page" },
   "flags": ["heard_the_stones"]
+}`;
+
+const FORCED_MOVE_EXAMPLE = `{
+  "id": "b",
+  "label": "Let them drag you",
+  "risk": "high",
+  "costTicks": 4,
+  "forced_move_to": { "x": -6, "y": 8, "biome": "cave" }
 }`;
 
 const GENESIS_SCHEMA_EXAMPLE = `{
@@ -65,7 +73,61 @@ const GENESIS_SCHEMA_EXAMPLE = `{
 }`;
 
 // ---------------------------------------------------------------
-// Format the since-last-beat log
+// Shared rule blocks
+// ---------------------------------------------------------------
+
+const MOVEMENT_RULES = `MOVEMENT — TWO KINDS:
+
+1. WALKING — use "moves_to".
+   - The player takes one step to an ADJACENT tile.
+   - Only use this for choices where the player physically walks.
+   - Destination MUST be one of the eight adjacent tiles listed in ADJACENT_TILES.
+   - Destination MUST be passable (not deep ocean).
+   - If you point at a wall or deep ocean, the engine silently drops the move.
+
+2. FORCED RELOCATION — use "forced_move_to".
+   - The player is moved against their will.
+   - Examples: abduction, swept away, falling, waking elsewhere, dragged.
+   - Destination can be ANY tile at ANY distance, passable or not.
+   - Use ONLY when the story demands it.
+
+3. Every choice uses exactly ONE of: moves_to, forced_move_to, or neither.
+
+COORDINATES AND DIRECTIONS:
+- Player position is { x, y }.
+- +x is EAST. -x is WEST.
+- +y is SOUTH. -y is NORTH.
+- Never describe a direction that contradicts ADJACENT_TILES.`;
+
+const CHOICE_RULES = `CHOICES:
+- Offer 0 to 3 choices.
+- 0 is FINE. Some places are just terrain.
+- A choice may cost time ("costTicks").
+- A choice may have a "hint" — short italic text under the label.
+- A choice may have a "risk": "none" | "low" | "medium" | "high" | "desperate".
+
+CHOICES ARE PERSISTENT:
+- A location's choices are generated once and cached.
+- Do NOT contradict choices the player has already seen at this location.
+
+CHOICES MAY EXPIRE:
+- "expiresOnDay": integer. When day > expiresOnDay, the choice becomes a tombstone with "expired_label".
+- Mark "permanent": true on choices consumed when taken.
+
+THREAD PROGRESS:
+- If the player genuinely reached a story milestone, include it in "thread_progress"
+  as { "thread_id": "milestone_text" }.`;
+
+const WEATHER_RULES = `WEATHER:
+- The WEATHER block tells you the current weather and how long it has lasted.
+- Weather changes over time. If the block says WEATHER_JUST_CHANGED, this is
+  the player's first experience of the new weather — describe the transition
+  naturally within your narration.
+- Do NOT invent weather. Do NOT contradict the block.
+- Do NOT narrate a sunny day during a storm. Do NOT offer fishing during a storm.`;
+
+// ---------------------------------------------------------------
+// Helpers
 // ---------------------------------------------------------------
 
 function buildSinceLastBeat(state) {
@@ -83,6 +145,17 @@ function buildSinceLastBeat(state) {
     lines.push(`${role}${entry.text}`);
   }
   return lines.join('\n');
+}
+
+function buildWeatherChangeBlock(state) {
+  const p = state.pendingWeatherChange;
+  if (!p) return '';
+  return `\nWEATHER_JUST_CHANGED:
+- From: ${p.from}
+- To: ${p.to}
+- This is the first time the player experiences this new weather.
+- Describe the transition or the new conditions in one clause of your narration.
+`;
 }
 
 // ---------------------------------------------------------------
@@ -164,6 +237,17 @@ Return valid json only.`;
 // ---------------------------------------------------------------
 
 export function arrivalBeatPrompts({ worldSeed, state, history, action, pacing, locationContext }) {
+  const strandedBlock = locationContext.stranded
+    ? `\nPLAYER IS STRANDED — CRITICAL:
+- The player is on impassable terrain with no passable adjacent tiles.
+- You MUST give at least one choice that moves them off the impassable tile.
+- forced_move_to is fine here.
+- Do NOT leave them stuck.
+`
+    : '';
+
+  const weatherChangeBlock = buildWeatherChangeBlock(state);
+
   const system = `You are the Game Master for a survival adventure on a mysterious uncharted island.
 
 You narrate in second person, present tense.
@@ -177,46 +261,20 @@ LENGTH: narration 2-4 sentences, max 70 words.
 ARRIVAL BEAT:
 - The player has just arrived at a location.
 - Narrate what they see. Then offer 0 to 3 choices.
-- 0 choices is FINE and often correct. Some places are just terrain.
-- 1 choice — a small find or a single decision.
-- 2 choices — a fork in the path.
-- 3 choices — a full story moment.
 
+${MOVEMENT_RULES}
+
+${CHOICE_RULES}
+
+${WEATHER_RULES}
+${weatherChangeBlock}${strandedBlock}
 SINCE_LAST_BEAT:
-- The block below shows everything the player has done since your last narration — every move, gather, craft, rest, even if no API call was made.
+- The block below shows everything the player has done since your last narration.
 - READ IT. Use it. Reference where the player has been.
-- If the block is long, the player has been busy. Honor that.
-
-MAKE IT INTERESTING:
-- The island should feel alive, not procedural.
-- Reference recent tiles the player visited.
-- Reference the time of day, weather, and camp.
-- If nothing interesting happens, say so briefly and let the player move.
-- Do NOT force drama.
-
-CHOICES ARE PERSISTENT:
-- A location's choices are generated once and cached.
-- Do NOT contradict choices the player has already seen at this location.
-- If a permanent fact applies, reference it and do NOT offer that choice again.
-
-CHOICES MAY EXPIRE:
-- "expiresOnDay": integer. When day > expiresOnDay, the choice becomes a tombstone with "expired_label".
-- Mark "permanent": true on choices that are consumed when taken.
-
-THREAD PROGRESS:
-- If the player genuinely reached a story milestone, include it in "thread_progress" as { "thread_id": "milestone_text" }.
-- The engine uses this to advance the pacing and unlock later story beats.
-- Only include it when a milestone is truly reached, not for flavour.
-
-WEATHER IS GIVEN, NOT INVENTED:
-- The WEATHER block tells you today's weather.
-- Do NOT narrate a sunny day during a storm. Do NOT offer fishing during a storm.
 
 The available resources, tools, buildings, and animals in this world:
 
 ${WORLD_BIBLE_JSON}
-
-The player may craft these recipes at any time if they have the resources and required buildings. Do not invent recipes outside this list.
 
 RECIPES:
 ${JSON.stringify(RECIPE_SUMMARY, null, 2)}`;
@@ -236,6 +294,9 @@ ${JSON.stringify(locationContext.weatherInfo, null, 2)}
 LOCATION CONTEXT:
 ${JSON.stringify(locationContext, null, 2)}
 
+ADJACENT_TILES (the ONLY valid targets for moves_to):
+${JSON.stringify(locationContext.adjacentTiles, null, 2)}
+
 RECENT TILES VISITED:
 ${JSON.stringify(locationContext.recentTiles || [], null, 2)}
 
@@ -248,11 +309,14 @@ ${history}
 PLAYER ACTION:
 ${JSON.stringify(action)}
 
-Narrate the arrival. Then offer 0, 1, 2, or 3 choices. Zero is fine.
+Narrate the arrival. Then offer 0, 1, 2, or 3 choices.
 
 Respond with valid json:
 
 ${BEAT_SCHEMA_EXAMPLE}
+
+For a forced-move choice:
+${FORCED_MOVE_EXAMPLE}
 
 Return valid json only.`;
 
@@ -260,10 +324,12 @@ Return valid json only.`;
 }
 
 // ---------------------------------------------------------------
-// 4. ACTION BEAT
+// 4. ACTION BEAT — normal (used for choices the player taps)
 // ---------------------------------------------------------------
 
 export function actionBeatPrompts({ worldSeed, state, history, action, pacing, locationContext }) {
+  const weatherChangeBlock = buildWeatherChangeBlock(state);
+
   const system = `You are the Game Master for a survival adventure on a mysterious uncharted island.
 
 You narrate in second person, present tense.
@@ -276,19 +342,85 @@ LENGTH: ONE SENTENCE. Maximum 30 words.
 
 ACTION BEAT:
 - The player just took an action. Narrate its outcome in one sentence.
-- Do NOT offer choices. The choices array must be empty.
-- Do NOT contradict the seed, the weather, or the current location.
+- Do NOT offer choices. The choices array MUST be empty.
 
-SINCE_LAST_BEAT:
-- Use the block below for continuity. Reference where they've been.
+${WEATHER_RULES}
+${weatherChangeBlock}
+MAKE IT INTERESTING ONLY WHEN IT'S EARNED.
+If nothing is worth remarking on, describe the action plainly.
 
-MAKE IT INTERESTING ONLY WHEN IT'S EARNED:
-- If the player has done something with consequence, reference it.
-- Cooking repeatedly at the same camp might attract animals nearby.
-- If nothing is worth remarking on, just describe the action.
+The available resources, tools, buildings, and animals in this world:
 
-WEATHER IS GIVEN, NOT INVENTED.
+${WORLD_BIBLE_JSON}`;
 
+  const user = `SINCE_LAST_BEAT:
+${buildSinceLastBeat(state)}
+
+CURRENT STATE:
+${JSON.stringify(state, null, 2)}
+
+WEATHER:
+${JSON.stringify(locationContext.weatherInfo, null, 2)}
+
+LOCATION CONTEXT:
+${JSON.stringify(locationContext, null, 2)}
+
+RECENT HISTORY:
+${history}
+
+PLAYER ACTION:
+${JSON.stringify(action)}
+
+Narrate the outcome in ONE sentence. Choices array MUST be empty.
+
+Return valid json:
+{
+  "narration": "One sentence.",
+  "beat_type": "flavour",
+  "choices": [],
+  "state_delta": {}
+}
+
+Return valid json only.`;
+
+  return { system, user };
+}
+
+// ---------------------------------------------------------------
+// 5. RARE EVENT BEAT — fired on the 8-30% roll after gather/craft/rest
+// ---------------------------------------------------------------
+
+export function rareEventBeatPrompts({ worldSeed, state, history, action, pacing, locationContext }) {
+  const weatherChangeBlock = buildWeatherChangeBlock(state);
+
+  const system = `You are the Game Master for a survival adventure on a mysterious uncharted island.
+
+You narrate in second person, present tense.
+
+You MUST respond with valid json only. No prose outside the json.
+
+TONE: hopeful but tense. Literary, not purple.
+
+LENGTH: 1-2 sentences. Maximum 40 words.
+
+RARE EVENT — this is NOT a normal action beat.
+
+An ordinary action has just occurred (gathering, crafting, resting). The engine
+has already applied the mechanical effects. You must NOT re-narrate the action.
+
+Instead, introduce ONE small unexpected thing the player notices, finds, or
+experiences during or just after the action. It must:
+- Be consistent with the biome, weather, and time of day.
+- Be brief.
+- Offer a small reward or hook: an item, a hint, a clue, an animal, a sound.
+- Optionally include a small "state_delta" for what was found (1 item, small stat).
+- NEVER advance a story thread — that is reserved for milestone beats.
+- If the seed has relevant threads, hint at them lightly. Do not resolve them.
+
+Choices array MUST be empty. This is flavour, not a decision point.
+
+${WEATHER_RULES}
+${weatherChangeBlock}
 The available resources, tools, buildings, and animals in this world:
 
 ${WORLD_BIBLE_JSON}`;
@@ -311,15 +443,14 @@ ${JSON.stringify(locationContext, null, 2)}
 RECENT HISTORY:
 ${history}
 
-PLAYER ACTION:
+PLAYER ACTION (already resolved):
 ${JSON.stringify(action)}
 
-Narrate the outcome in ONE sentence. Choices array is empty.
+Introduce ONE small unexpected thing noticed during or after this action.
 
-Respond with valid json of shape:
-
+Return valid json:
 {
-  "narration": "One sentence describing what happened.",
+  "narration": "One or two sentences.",
   "beat_type": "flavour",
   "choices": [],
   "state_delta": {}
