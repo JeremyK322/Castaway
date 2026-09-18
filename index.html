@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#1a1410" />
+<title>Castaway</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ============ TOP BAR ============ -->
+  <header id="topbar">
+    <div class="stat" title="Health">
+      <span class="stat-icon">❤</span>
+      <span class="stat-value" id="stat-health">100</span>
+    </div>
+    <div class="stat" title="Food">
+      <span class="stat-icon">🍖</span>
+      <span class="stat-value" id="stat-food">100</span>
+    </div>
+    <div class="stat" title="Water">
+      <span class="stat-icon">💧</span>
+      <span class="stat-value" id="stat-water">100</span>
+    </div>
+    <div class="stat" title="Morale">
+      <span class="stat-icon">✦</span>
+      <span class="stat-value" id="stat-morale">60</span>
+    </div>
+    <button id="btn-weather" aria-label="Weather">☀</button>
+    <button id="btn-settings" aria-label="Settings">⚙</button>
+  </header>
+
+  <!-- ============ WEATHER POPOVER ============ -->
+  <div id="weather-popover" class="popover hidden" role="dialog" aria-labelledby="weather-title">
+    <div class="popover-backdrop" data-close="weather"></div>
+    <div class="popover-panel">
+      <header class="popover-header">
+        <h3 id="weather-title">Weather</h3>
+        <button class="modal-close" data-close="weather" aria-label="Close">✕</button>
+      </header>
+      <div class="popover-body">
+        <div class="weather-main">
+          <span class="weather-icon" id="weather-icon">☀</span>
+          <div>
+            <div class="weather-name" id="weather-name">Clear</div>
+            <div class="weather-sub" id="weather-sub">Day 1</div>
+          </div>
+        </div>
+        <div class="weather-effects" id="weather-effects"></div>
+        <div class="weather-forecast">
+          <span class="forecast-label">Tomorrow</span>
+          <span class="forecast-value" id="weather-forecast">—</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ CLOCK ROW ============ -->
+  <div id="clockbar">
+    <span id="clock-day">Day 1</span>
+    <span id="clock-time">06:00</span>
+    <span id="clock-tod">🌅 Dawn</span>
+  </div>
+
+  <!-- ============ MAIN SCENE ============ -->
+  <main id="scene">
+
+    <div id="viewport" aria-label="Island map"></div>
+
+    <div id="compass">
+      <span class="compass-n">N</span>
+      <span class="compass-e">E</span>
+      <span class="compass-s">S</span>
+      <span class="compass-w">W</span>
+    </div>
+
+    <!-- Supplies line: appears when food or water low -->
+    <div id="supplies-line" class="hidden">
+      <span id="supplies-line-text"></span>
+    </div>
+
+    <!-- Camp line: shows when player is on a tile with camp structures -->
+    <div id="camp-line" class="hidden">
+      <span id="camp-line-text"></span>
+    </div>
+
+    <section id="narration" aria-live="polite">
+      <h2 id="narration-title">The Perseverance</h2>
+      <p id="narration-text">
+        You wake on cold sand. Salt in your throat. The ship is gone.
+        Somewhere beyond the treeline, the island waits.
+      </p>
+    </section>
+
+  </main>
+
+  <!-- ============ CHOICES ============ -->
+  <section id="choices" aria-label="Choices"></section>
+
+  <!-- ============ ACTION BAR ============ -->
+  <nav id="actionbar">
+    <button class="action" data-action="gather">
+      <span class="action-icon">✋</span>
+      <span class="action-label">Gather</span>
+    </button>
+    <button class="action" data-action="craft">
+      <span class="action-icon">⚒</span>
+      <span class="action-label">Craft</span>
+    </button>
+    <button class="action" data-action="inventory">
+      <span class="action-icon">🎒</span>
+      <span class="action-label">Inventory</span>
+    </button>
+    <button class="action" data-action="rest">
+      <span class="action-icon">🛖</span>
+      <span class="action-label">Rest</span>
+    </button>
+  </nav>
+
+  <!-- ============ NET BANNER ============ -->
+  <div id="net-banner" class="hidden" role="status">
+    <span id="net-message">Lost connection.</span>
+    <button id="net-retry">Retry</button>
+  </div>
+
+  <!-- ============ LOADING ============ -->
+  <div id="loading" class="hidden" role="status" aria-live="polite">
+    <div class="spinner"></div>
+    <span id="loading-text">The island takes shape…</span>
+  </div>
+
+  <!-- ============ OPENING ============ -->
+  <div id="opening" class="hidden" role="dialog" aria-modal="true">
+    <div class="opening-panel">
+      <h1 id="opening-title">Castaway</h1>
+      <p id="opening-text">
+        You are about to wake on an uncharted island. The story is authored
+        by your chosen model — every playthrough is different.
+      </p>
+      <button id="btn-begin" class="btn-primary">Begin</button>
+      <p class="opening-hint">Requires an API key. Set it in ⚙.</p>
+    </div>
+  </div>
+
+  <!-- ============ MANUAL MODAL ============ -->
+  <div id="manual-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="manual-title">
+    <div class="modal-panel manual-panel">
+      <header class="modal-header">
+        <h2 id="manual-title">Instructions</h2>
+        <span class="manual-progress" id="manual-progress">1 / 5</span>
+      </header>
+
+      <div class="modal-body manual-body">
+        <div class="manual-page" data-page="1">
+          <h3>Move</h3>
+          <p>Tap any adjacent tile to walk to it. The map always shows your current tile in the centre, surrounded by the eight tiles around you.</p>
+          <p>Colours tell you what you're standing on:</p>
+          <ul>
+            <li><span class="swatch sw-beach"></span> Sand — the beach</li>
+            <li><span class="swatch sw-jungle"></span> Green — jungle</li>
+            <li><span class="swatch sw-marsh"></span> Olive — marsh</li>
+            <li><span class="swatch sw-hills"></span> Brown — hills</li>
+            <li><span class="swatch sw-cliff"></span> Grey — cliff</li>
+            <li><span class="swatch sw-cave"></span> Black — cave</li>
+            <li><span class="swatch sw-ruins"></span> Dark — ruins</li>
+            <li><span class="swatch sw-shallow"></span> Light blue — shallow water. You can wade, but the tide has teeth.</li>
+            <li><span class="swatch sw-deep"></span> Dark blue — open sea. You cannot enter without a boat.</li>
+          </ul>
+          <p>Some tiles are fogged. To see them, stand next to them.</p>
+        </div>
+
+        <div class="manual-page hidden" data-page="2">
+          <h3>Choices</h3>
+          <p>Each place you visit may offer you choices. Tap one to act. Most choices take time.</p>
+          <p>Some choices are <strong>one-time only</strong>. If you salvage the wreck, the wreck is gone. If you take the journal page, it is not there when you return.</p>
+          <p>Some choices <strong>expire</strong>. A message will say <em>"The ship has been lost to the sea."</em> Tap it once to dismiss it.</p>
+          <p>Some places have nothing to offer. You will walk through them, see the land, and move on. That is the island. It has many quiet places.</p>
+          <p>Choices are remembered. When you return to a place, the same choices wait — unless time, weather, or the story has changed.</p>
+        </div>
+
+        <div class="manual-page hidden" data-page="3">
+          <h3>Time</h3>
+          <p>One day is 24 hours. Every action costs hours. Sleeping, working, walking, waiting — all of it takes time.</p>
+          <p>When you choose a slow action, a keypad appears. Type the hours you'll spend, then tap <strong>Go</strong>.</p>
+          <p>Time is the only resource you cannot gather back. The sun sets whether you are ready or not.</p>
+          <p><strong>Night is dangerous.</strong> Without fire, without shelter, a night in the open can take your health. Build a camp early.</p>
+          <p><strong>Weather changes each day.</strong> Tap the icon in the top right to see what today brings — and what tomorrow will.</p>
+        </div>
+
+        <div class="manual-page hidden" data-page="4">
+          <h3>Your tools</h3>
+          <p>The four buttons at the bottom are your hands:</p>
+          <ul>
+            <li><strong>Gather</strong> — pick up what this place offers. Wood on the beach, berries in the jungle, fresh water in the marsh. You choose how many hours to spend.</li>
+            <li><strong>Craft</strong> — make tools, cook food, build camp. You can only build on the tile you are standing on.</li>
+            <li><strong>Inventory</strong> — see everything you carry. Tap any food or water to eat or drink it.</li>
+            <li><strong>Rest</strong> — sleep. Rest heals you and steadies your mind. A camp with a fire, a lean-to, a hut — each one makes rest better.</li>
+          </ul>
+          <p>Your camp grows where you build it. Return to it to add more. A place with fire and shelter will keep you alive through storms.</p>
+        </div>
+
+        <div class="manual-page hidden" data-page="5">
+          <h3>Survival</h3>
+          <p>Keep four things above zero: <strong>health</strong>, <strong>food</strong>, <strong>water</strong>, <strong>morale</strong>. If any one falls to nothing, you fall with it.</p>
+          <p><strong>You eat and drink automatically</strong> when your food or water drops below a third. The island provides — but only if you carry it. A full pack cannot save an empty one.</p>
+          <p>Raw fish and raw meat can make you sick. Cook them at a campfire when you can. Berries and fresh water are safe, but give less.</p>
+          <p>You can also <strong>use items from your Inventory</strong> at any time — tap a berry to eat it early, tap a bandage to stop a wound from bleeding.</p>
+          <p>Water runs out faster than food. Build a well at camp. Collect rainwater in storms. Do not travel without a full canteen.</p>
+          <p>You are not alone on this island. There is a secret here — older than any ship. Follow what you find. Read what is written. The island has been waiting.</p>
+          <p class="manual-final-line">Good luck. The <em>Perseverance</em> was not the first ship to break on these shores.</p>
+        </div>
+      </div>
+
+      <footer class="modal-footer manual-footer">
+        <button id="btn-manual-prev" class="btn-secondary">Back</button>
+        <button id="btn-manual-next" class="btn-primary" disabled>Continue</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- ============ GATHER MODAL ============ -->
+  <div id="gather-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="gather-title">
+    <div class="modal-backdrop" data-close="gather"></div>
+    <div class="modal-panel">
+      <header class="modal-header">
+        <h2 id="gather-title">Gather</h2>
+        <button class="modal-close" data-close="gather" aria-label="Close">✕</button>
+      </header>
+      <div class="modal-body" id="gather-body"></div>
+    </div>
+  </div>
+
+  <!-- ============ CRAFT MODAL ============ -->
+  <div id="craft-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="craft-title">
+    <div class="modal-backdrop" data-close="craft"></div>
+    <div class="modal-panel">
+      <header class="modal-header">
+        <h2 id="craft-title">Craft</h2>
+        <button class="modal-close" data-close="craft" aria-label="Close">✕</button>
+      </header>
+      <div class="modal-body" id="craft-body"></div>
+    </div>
+  </div>
+
+  <!-- ============ INVENTORY MODAL ============ -->
+  <div id="inventory-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="inventory-title">
+    <div class="modal-backdrop" data-close="inventory"></div>
+    <div class="modal-panel">
+      <header class="modal-header">
+        <h2 id="inventory-title">Inventory</h2>
+        <button class="modal-close" data-close="inventory" aria-label="Close">✕</button>
+      </header>
+      <div class="modal-body" id="inventory-body"></div>
+    </div>
+  </div>
+
+  <!-- ============ HISTORY MODAL ============ -->
+  <div id="history-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="history-title">
+    <div class="modal-backdrop" data-close="history"></div>
+    <div class="modal-panel">
+      <header class="modal-header">
+        <h2 id="history-title">History</h2>
+        <button class="modal-close" data-close="history" aria-label="Close">✕</button>
+      </header>
+      <div class="modal-body" id="history-body"></div>
+    </div>
+  </div>
+
+  <!-- ============ NUMPAD ============ -->
+  <div id="numpad-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="numpad-title">
+    <div class="modal-backdrop" data-close="numpad"></div>
+    <div class="modal-panel numpad-panel">
+      <header class="modal-header">
+        <h2 id="numpad-title">How many hours?</h2>
+        <button class="modal-close" data-close="numpad" aria-label="Close">✕</button>
+      </header>
+      <div class="modal-body">
+        <p class="numpad-sub" id="numpad-sub">Action</p>
+        <div class="numpad-display" id="numpad-display">0</div>
+        <div class="numpad-grid">
+          <button class="np-key" data-key="1">1</button>
+          <button class="np-key" data-key="2">2</button>
+          <button class="np-key" data-key="3">3</button>
+          <button class="np-key" data-key="4">4</button>
+          <button class="np-key" data-key="5">5</button>
+          <button class="np-key" data-key="6">6</button>
+          <button class="np-key" data-key="7">7</button>
+          <button class="np-key" data-key="8">8</button>
+          <button class="np-key" data-key="9">9</button>
+          <button class="np-key np-clear" data-key="C">C</button>
+          <button class="np-key" data-key="0">0</button>
+          <button class="np-key np-back" data-key="←">←</button>
+        </div>
+        <div class="numpad-actions">
+          <button id="btn-numpad-cancel" class="btn-secondary">Cancel</button>
+          <button id="btn-numpad-confirm" class="btn-primary">Go</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ SETTINGS ============ -->
+  <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-backdrop" data-close="settings"></div>
+    <div class="modal-panel">
+      <header class="modal-header">
+        <h2 id="settings-title">Settings</h2>
+        <button class="modal-close" data-close="settings" aria-label="Close">✕</button>
+      </header>
+      <div class="modal-body">
+
+        <label class="field">
+          <span class="field-label">Provider</span>
+          <select id="input-provider">
+            <option value="deepseek" selected>DeepSeek</option>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="gemini">Google Gemini</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span class="field-label">API Key</span>
+          <input id="input-apikey" type="password" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="paste your key" />
+        </label>
+
+        <label class="field">
+          <span class="field-label">Model</span>
+          <input id="input-model" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="deepseek-v4-flash" />
+        </label>
+
+        <p class="field-hint" id="provider-hint">
+          Key is stored only on this device. Never sent anywhere except your chosen provider.
+        </p>
+
+        <div class="settings-actions">
+          <button id="btn-save-settings" class="btn-primary">Save</button>
+          <button id="btn-clear-settings" class="btn-secondary">Clear Key</button>
+        </div>
+
+        <div class="settings-actions">
+          <button id="btn-show-history" class="btn-secondary">History</button>
+          <button id="btn-show-manual" class="btn-secondary">Instructions</button>
+        </div>
+
+        <div class="settings-actions">
+          <button id="btn-new-game" class="btn-secondary">New Game</button>
+          <button id="btn-reset-save" class="btn-secondary">Reset Save</button>
+        </div>
+
+        <div class="settings-status" id="settings-status" aria-live="polite"></div>
+
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script type="module" src="js/settings.js"></script>
+<script type="module" src="js/main.js"></script>
+
+</body>
+</html>
