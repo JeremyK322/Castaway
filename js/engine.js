@@ -68,10 +68,12 @@ export function movePlayer(state, tx, ty) {
     }
   }
 
-  advanceTicks(state, wx.movementCost);
+  const cost = wx.movementCost;
+  advanceTicks(state, cost);
   autoConsume(state);
+  applyStarvationDamage(state, cost);
 
-  return { ok: true, biome: tile.biome, weather: wx.id };
+  return { ok: true, biome: tile.biome, weather: wx.id, cost };
 }
 
 // ---------- fire survival ----------
@@ -243,6 +245,7 @@ export function craftRecipe(state, recipeId) {
 
   advanceTicks(state, r.costTicks || 1);
   autoConsume(state);
+  applyStarvationDamage(state, r.costTicks || 1);
 
   if (r.kind === 'tool') {
     if (!state.tools.includes(r.id)) state.tools.push(r.id);
@@ -261,18 +264,13 @@ export function craftRecipe(state, recipeId) {
 
 // ---------- consumption ----------
 
-/**
- * Best edible inventory item for a category, or null.
- */
 export function bestConsumable(state, category) {
   const order = (worldBible.consumeOrder || {})[category] || [];
   for (const id of order) {
-    // Raw resources
     const res = resourceById(id);
     if (res && (state.inventory[id] || 0) > 0) {
       return { kind: 'resource', id, def: res };
     }
-    // Crafted items
     const rec = recipeById(id);
     if (rec && (state.craftedItems[id] || 0) > 0) {
       return { kind: 'item', id, def: rec };
@@ -281,10 +279,6 @@ export function bestConsumable(state, category) {
   return null;
 }
 
-/**
- * Auto-consume one food and one water item if stats are below threshold.
- * Called after every tick advance.
- */
 export function autoConsume(state) {
   const THRESHOLD = 35;
 
@@ -308,25 +302,25 @@ function consumeOne(state, pick) {
     const delta = {};
     if (edible.food)  delta.food  = edible.food;
     if (edible.water) delta.water = edible.water;
+    let verb = 'Ate';
+    if (!edible.food && edible.water) verb = 'Drank';
     if (edible.sickChance && Math.random() < edible.sickChance) {
       delta.health = -(edible.sickDamage || 5);
-      pushGameHistory(state, 'player', `Ate ${pick.def.name} raw. Felt sick.`);
+      pushGameHistory(state, 'player', `${verb} ${pick.def.name} raw. Felt sick.`);
     } else {
-      pushGameHistory(state, 'player', `Ate ${pick.def.name}.`);
+      pushGameHistory(state, 'player', `${verb} ${pick.def.name}.`);
     }
     applyDelta(state, delta);
   } else {
     state.craftedItems[id] = Math.max(0, (state.craftedItems[id] || 0) - 1);
     const effects = pick.def.effects?.consumable || {};
     applyDelta(state, effects);
-    pushGameHistory(state, 'player', `Ate ${pick.def.name}.`);
+    // Pick the right verb: bandages are used, food is eaten
+    const verb = effects.food ? 'Ate' : effects.health ? 'Used' : 'Used';
+    pushGameHistory(state, 'player', `${verb} ${pick.def.name}.`);
   }
 }
 
-/**
- * Manual consume from inventory — the player tapped an item.
- * Returns the delta applied and a description.
- */
 export function consumeFromInventory(state, kind, id) {
   if (kind === 'resource') {
     const res = resourceById(id);
@@ -337,6 +331,8 @@ export function consumeFromInventory(state, kind, id) {
     const edible = res.edible;
     const delta = {};
     let sickness = false;
+    let verb = 'Ate';
+    if (!edible.food && edible.water) verb = 'Drank';
     if (edible.food)  delta.food  = edible.food;
     if (edible.water) delta.water = edible.water;
     if (edible.sickChance && Math.random() < edible.sickChance) {
@@ -344,7 +340,7 @@ export function consumeFromInventory(state, kind, id) {
       sickness = true;
     }
     applyDelta(state, delta);
-    pushGameHistory(state, 'player', `Ate ${res.name}${sickness ? ' (raw, sick)' : ''}.`);
+    pushGameHistory(state, 'player', `${verb} ${res.name}${sickness ? ' (raw, sick)' : ''}.`);
     return { ok: true, delta, sickness, name: res.name };
   }
 
@@ -355,16 +351,14 @@ export function consumeFromInventory(state, kind, id) {
 
     state.craftedItems[id] -= 1;
     applyDelta(state, rec.effects.consumable);
-    pushGameHistory(state, 'player', `Used ${rec.name}.`);
+    const verb = rec.effects.consumable.food ? 'Ate' : 'Used';
+    pushGameHistory(state, 'player', `${verb} ${rec.name}.`);
     return { ok: true, delta: rec.effects.consumable, name: rec.name };
   }
 
   return { ok: false };
 }
 
-/**
- * Summary of edible supplies for the UI.
- */
 export function suppliesSummary(state) {
   const foods = [];
   const waters = [];
@@ -386,23 +380,23 @@ export function suppliesSummary(state) {
   return { foods, waters };
 }
 
-// ---------- starvation / dehydration drain ----------
+// ---------- starvation ----------
 
-/**
- * Applied after every tick advance. If food or water is zero, drain health.
- */
 export function applyStarvationDamage(state, ticks) {
   if (ticks <= 0) return;
   let drain = 0;
-  if (state.stats.food <= 0)  drain += 1 * Math.max(1, Math.floor(ticks / 4));
-  if (state.stats.water <= 0) drain += 1 * Math.max(1, Math.floor(ticks / 4));
+  if (state.stats.food <= 0)  drain += Math.max(1, Math.floor(ticks / 4));
+  if (state.stats.water <= 0) drain += Math.max(1, Math.floor(ticks / 4));
   if (drain > 0) {
     applyDelta(state, { health: -drain });
-    pushGameHistory(state, 'gm', `You are weakened by ${state.stats.food <= 0 ? 'hunger' : 'thirst'}.`);
+    const causes = [];
+    if (state.stats.food <= 0)  causes.push('hunger');
+    if (state.stats.water <= 0) causes.push('thirst');
+    pushGameHistory(state, 'gm', `You are weakened by ${causes.join(' and ')}.`);
   }
 }
 
-// ---------- apply a beat ----------
+// ---------- beats ----------
 
 export function applyBeat(state, beat) {
   if (!beat || typeof beat !== 'object') return state;

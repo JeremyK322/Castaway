@@ -1,19 +1,18 @@
 // main.js — the game loop.
 
 import { callLLM, parseJSONResponse, ApiError } from './api.js';
-import { loadSettings, hasApiKey } from './settings.js';
+import { hasApiKey, openModal as openSettingsModal } from './settings.js';
 import { tileAt } from './island-gen.js';
 import {
   genesisPrompts, midGenesisPrompts,
   arrivalBeatPrompts, actionBeatPrompts,
 } from './prompts.js';
 import { buildPacingBlock } from './pacing.js';
-import { weatherData } from './weather.js';
 import { worldBible } from './world.js';
 import {
   defaultState, loadState, saveState, clearState,
   revealAround, markVisited, setTileInCache,
-  getLocation, setLocation, computeConditionHash,
+  getLocation, computeConditionHash,
   advanceTicks, getDay, getHour, getTimeOfDay, formatClock,
   pushGameHistory, pushRecentTile, addTileEvent,
   markHistorySeen,
@@ -30,7 +29,7 @@ import {
   applyWeatherToFires,
   gatherOptionsForTile, gatherYield,
   restBonus,
-  recipeById, resourceById, canCraft, craftRecipe,
+  recipeById, canCraft, craftRecipe,
   consumeFromInventory, suppliesSummary, applyStarvationDamage, autoConsume,
   buildingsOnTile,
 } from './engine.js';
@@ -326,8 +325,6 @@ async function runGenesis() {
 
     state.player.x = 0;
     state.player.y = 0;
-    state.day = 1;
-    state.lastBeatDay = 1;
     markVisited(state, 0, 0);
     revealAround(state, 0, 0, 1);
 
@@ -383,8 +380,6 @@ async function runGenesis() {
 
 async function runBeat(action, opts = {}) {
   if (busy) return;
-  if (!state.islandSeed) return;
-
   busy = true;
   showLoading(opts.loadingText || '…');
 
@@ -579,9 +574,6 @@ async function onTileTap(x, y) {
     }
   }
 
-  // Starvation damage from any tick advance that skipped a beat
-  applyStarvationDamage(state, 1);
-
   pushRecentTile(state, x, y, null);
   pushGameHistory(state, 'player', `Moved to (${x}, ${y})`);
 
@@ -625,39 +617,66 @@ async function onTileTap(x, y) {
 
 async function onChoiceTap(choice) {
   if (busy) return;
+  busy = true;
+  try {
+    pushGameHistory(state, 'player', `Chose: ${choice.label}`);
 
-  pushGameHistory(state, 'player', `Chose: ${choice.label}`);
+    let movedByChoice = false;
+    if (choice.moves_to && typeof choice.moves_to.x === 'number') {
+      const nx = choice.moves_to.x;
+      const ny = choice.moves_to.y;
+      if (isAdjacent(state.player.x, state.player.y, nx, ny)) {
+        const m = movePlayer(state, nx, ny);
+        if (m.ok) {
+          movedByChoice = true;
+          pushRecentTile(state, nx, ny, null);
+          pushGameHistory(state, 'player', `Moved to (${nx}, ${ny})`);
+          renderViewport();
+          renderClock();
+          const afterDay = getDay(state);
+          if (afterDay !== state.weatherDay) ensureWeatherForToday(state);
+        }
+      }
+    } else if (choice.costTicks > 0) {
+      advanceTicks(state, choice.costTicks);
+      autoConsume(state);
+      applyStarvationDamage(state, choice.costTicks);
+      renderClock();
+    }
 
-  if (choice.moves_to && typeof choice.moves_to.x === 'number') {
-    const nx = choice.moves_to.x;
-    const ny = choice.moves_to.y;
-    if (isAdjacent(state.player.x, state.player.y, nx, ny)) {
-      const m = movePlayer(state, nx, ny);
-      if (m.ok) {
-        pushRecentTile(state, nx, ny, null);
-        pushGameHistory(state, 'player', `Moved to (${nx}, ${ny})`);
-        renderViewport();
-        renderClock();
-        const afterDay = getDay(state);
-        if (afterDay !== state.weatherDay) ensureWeatherForToday(state);
+    if (choice.permanent) {
+      const loc = getLocation(state, state.player.x, state.player.y);
+      if (loc) markChoiceTaken(state, loc, choice.id, true);
+    }
+
+    renderStats();
+    renderSuppliesLine();
+    saveState(state);
+
+    // If the choice moved us and the destination needs choices, fire an arrival beat.
+    // Otherwise fire an action beat.
+    let mode = 'action';
+    let beatOpts = { mode };
+    if (movedByChoice) {
+      const destLoc = ensureLocation(state, state.player.x, state.player.y);
+      const isNew = isNewLocation(state, state.player.x, state.player.y);
+      const needsRegen = isNew || shouldRegenerateChoices(state, state.player.x, state.player.y);
+      if (needsRegen) {
+        mode = 'arrival';
+        beatOpts = {
+          mode: 'arrival',
+          isNewLocation: isNew,
+          cachedChoices: destLoc.choices || null,
+        };
       }
     }
-  } else if (choice.costTicks > 0) {
-    advanceTicks(state, choice.costTicks);
-    autoConsume(state);
-    applyStarvationDamage(state, choice.costTicks);
-    renderClock();
-  }
 
-  if (choice.permanent) {
-    const loc = getLocation(state, state.player.x, state.player.y);
-    if (loc) markChoiceTaken(state, loc, choice.id, true);
+    // runBeat sets busy; we need to release our lock first.
+    busy = false;
+    await runBeat({ type: 'choice', id: choice.id, label: choice.label }, beatOpts);
+  } finally {
+    busy = false;
   }
-
-  renderStats();
-  renderSuppliesLine();
-  saveState(state);
-  await runBeat({ type: 'choice', id: choice.id, label: choice.label }, { mode: 'action' });
 }
 
 function onTombstoneTap(choice) {
@@ -671,17 +690,36 @@ function onTombstoneTap(choice) {
 
 async function onVariableChoiceTap(choice) {
   if (busy) return;
-  openNumpad(choice.label, async (hours) => {
-    if (!hours || hours <= 0) return;
-    advanceTicks(state, hours);
-    autoConsume(state);
-    applyStarvationDamage(state, hours);
-    renderClock();
-    renderStats();
-    renderSuppliesLine();
-    saveState(state);
-    await runBeat({ type: 'choice', id: choice.id, label: choice.label, hours }, { mode: 'action' });
-  });
+  busy = true;
+  try {
+    openNumpad(choice.label, async (hours) => {
+      if (!hours || hours <= 0) {
+        busy = false;
+        return;
+      }
+      advanceTicks(state, hours);
+      autoConsume(state);
+      applyStarvationDamage(state, hours);
+      renderClock();
+      renderStats();
+      renderSuppliesLine();
+      saveState(state);
+      busy = false;
+      await runBeat({ type: 'choice', id: choice.id, label: choice.label, hours }, { mode: 'action' });
+    });
+  } catch (err) {
+    busy = false;
+    throw err;
+  }
+  // busy remains true until the numpad resolves; if user cancels, we release
+  // via the Cancel button handler below.
+  // Safety: if the modal closes without firing confirm, we release via a
+  // microtask. Simplest: rely on Cancel button calling closeNumpad.
+}
+
+// Release busy when the numpad is dismissed without confirming.
+function watchNumpadCancel(prevConfirm) {
+  // Called once from wireNumpad
 }
 
 // ---------------------------------------------------------------
@@ -703,6 +741,8 @@ function closeNumpad() {
   $('numpad-modal').classList.add('hidden');
   numpadValue = '';
   numpadConfirm = null;
+  // If we were awaiting a variable choice, release the lock.
+  if (busy) busy = false;
 }
 
 function wireNumpad() {
@@ -720,8 +760,16 @@ function wireNumpad() {
   $('btn-numpad-confirm').addEventListener('click', async () => {
     const hours = parseInt(numpadValue || '0', 10);
     const fn = numpadConfirm;
-    closeNumpad();
-    if (fn && hours > 0) await fn(hours);
+    // Don't null out confirm until we've called it
+    if (!fn || hours <= 0) {
+      closeNumpad();
+      return;
+    }
+    // Hide the modal without triggering the busy-release path in closeNumpad
+    $('numpad-modal').classList.add('hidden');
+    numpadValue = '';
+    numpadConfirm = null;
+    await fn(hours);
   });
 }
 
@@ -807,40 +855,43 @@ function openGatherModal() {
 async function doGather(opt, hours) {
   if (busy) return;
   busy = true;
+  try {
+    const result = gatherYield(state, opt.id, hours);
+    advanceTicks(state, hours);
+    autoConsume(state);
+    applyStarvationDamage(state, hours);
 
-  const result = gatherYield(state, opt.id, hours);
-  advanceTicks(state, hours);
-  autoConsume(state);
-  applyStarvationDamage(state, hours);
-
-  if (result.qty > 0) {
-    state.inventory[opt.id] = (state.inventory[opt.id] || 0) + result.qty;
-    if (opt.id === 'berries' || opt.id === 'fish' || opt.id === 'meat') {
-      addTileEvent(state, state.player.x, state.player.y, `${opt.id}_gathered`);
+    if (result.qty > 0) {
+      state.inventory[opt.id] = (state.inventory[opt.id] || 0) + result.qty;
+      if (opt.id === 'berries' || opt.id === 'fish' || opt.id === 'meat') {
+        addTileEvent(state, state.player.x, state.player.y, `${opt.id}_gathered`);
+      }
     }
+
+    pushGameHistory(state, 'player',
+      `Gathered ${opt.name} for ${hours}h. Found ${result.qty}.`);
+
+    renderStats();
+    renderClock();
+    renderSuppliesLine();
+    saveState(state);
+
+    busy = false;
+
+    await runBeat(
+      {
+        type: 'bar',
+        action: 'gather',
+        resource: opt.id,
+        resourceName: opt.name,
+        hours,
+        qty: result.qty,
+      },
+      { mode: 'action', loadingText: 'Gathering…' }
+    );
+  } finally {
+    busy = false;
   }
-
-  pushGameHistory(state, 'player',
-    `Gathered ${opt.name} for ${hours}h. Found ${result.qty}.`);
-
-  renderStats();
-  renderClock();
-  renderSuppliesLine();
-  saveState(state);
-
-  busy = false;
-
-  await runBeat(
-    {
-      type: 'bar',
-      action: 'gather',
-      resource: opt.id,
-      resourceName: opt.name,
-      hours,
-      qty: result.qty,
-    },
-    { mode: 'action', loadingText: 'Gathering…' }
-  );
 }
 
 // ---------------------------------------------------------------
@@ -947,7 +998,6 @@ function openInventoryModal() {
   const body = $('inventory-body');
   body.innerHTML = '';
 
-  // Edible resources (food/water)
   const edibleResources = (worldBible.resources || []).filter(r =>
     r.edible && (state.inventory[r.id] || 0) > 0
   );
@@ -986,7 +1036,6 @@ function openInventoryModal() {
     }
   }
 
-  // Crafted items
   const crafted = Object.entries(state.craftedItems || {}).filter(([_, n]) => n > 0);
   if (crafted.length > 0) {
     const title = document.createElement('div');
@@ -1022,7 +1071,6 @@ function openInventoryModal() {
     }
   }
 
-  // Raw resources (non-edible)
   const resources = worldBible.resources.filter(r =>
     !r.edible && (state.inventory[r.id] || 0) > 0
   );
@@ -1045,7 +1093,6 @@ function openInventoryModal() {
     }
   }
 
-  // Tools
   if (state.tools.length > 0) {
     const title = document.createElement('div');
     title.className = 'menu-section-title';
@@ -1067,7 +1114,6 @@ function openInventoryModal() {
     }
   }
 
-  // Camp
   const camps = Object.entries(state.buildingsByTile || {}).filter(([_, list]) => list.length > 0);
   if (camps.length > 0) {
     const title = document.createElement('div');
@@ -1203,7 +1249,7 @@ function wireActionBar() {
   document.querySelectorAll('.action').forEach(btn => {
     btn.addEventListener('click', () => {
       if (busy) return;
-      if (!hasApiKey()) { openSettings(); return; }
+      if (!hasApiKey()) { openSettingsModal(); return; }
       if (!state.islandSeed) return;
       const action = btn.dataset.action;
 
@@ -1212,32 +1258,38 @@ function wireActionBar() {
       if (action === 'inventory') return openInventoryModal();
 
       if (action === 'rest') {
+        busy = true;
         openNumpad('How many hours will you rest?', async (hours) => {
-          const bonus = restBonus(state, state.player.x, state.player.y);
-          advanceTicks(state, hours);
-          const hpGain = bonus.hpPerHour * hours;
-          const moGain = bonus.moralePerHour * hours;
-          const waGain = bonus.waterPerHour * hours;
-          const foodCost = Math.max(0, Math.round(hours * 0.6));
-          applyBeat(state, {
-            state_delta: {
-              health: hpGain,
-              morale: moGain,
-              water: waGain - Math.round(hours * 0.4),
-              food: -foodCost,
-            },
-          });
-          autoConsume(state);
-          applyStarvationDamage(state, hours);
-          pushGameHistory(state, 'player', `Rested for ${hours}h.`);
-          renderStats();
-          renderClock();
-          renderSuppliesLine();
-          saveState(state);
-          await runBeat(
-            { type: 'bar', action, hours },
-            { mode: 'action', loadingText: 'Resting…' }
-          );
+          try {
+            const bonus = restBonus(state, state.player.x, state.player.y);
+            advanceTicks(state, hours);
+            const hpGain = bonus.hpPerHour * hours;
+            const moGain = bonus.moralePerHour * hours;
+            const waGain = bonus.waterPerHour * hours;
+            const foodCost = Math.max(0, Math.round(hours * 0.6));
+            applyBeat(state, {
+              state_delta: {
+                health: hpGain,
+                morale: moGain,
+                water: waGain - Math.round(hours * 0.4),
+                food: -foodCost,
+              },
+            });
+            autoConsume(state);
+            applyStarvationDamage(state, hours);
+            pushGameHistory(state, 'player', `Rested for ${hours}h.`);
+            renderStats();
+            renderClock();
+            renderSuppliesLine();
+            saveState(state);
+            busy = false;
+            await runBeat(
+              { type: 'bar', action, hours },
+              { mode: 'action', loadingText: 'Resting…' }
+            );
+          } finally {
+            busy = false;
+          }
         });
       }
     });
@@ -1268,10 +1320,6 @@ function handleError(err) {
 // SETTINGS
 // ---------------------------------------------------------------
 
-function openSettings() {
-  $('settings-modal').classList.remove('hidden');
-}
-
 function wireSettingsButtons() {
   const btnHistory = $('btn-show-history');
   if (btnHistory) btnHistory.addEventListener('click', openHistoryModal);
@@ -1300,7 +1348,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btnBegin.addEventListener('click', async () => {
       openingEl.classList.add('hidden');
       if (!hasApiKey()) {
-        openSettings();
+        openSettingsModal();
         setNarration('Settings', 'Add your DeepSeek API key (⚙), then tap New Game.');
         return;
       }

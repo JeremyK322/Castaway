@@ -21,7 +21,9 @@ const BEAT_SCHEMA_EXAMPLE = `{
     { "id": "b", "label": "Push deeper",             "risk": "high", "costTicks": 2, "moves_to": { "x": 3, "y": -1 } },
     { "id": "c", "label": "Return to camp",          "risk": "none", "costTicks": 1, "moves_to": { "x": 0, "y": 0 } }
   ],
-  "state_delta": { "water": -5, "morale": 2 }
+  "state_delta": { "water": -5, "morale": 2 },
+  "thread_progress": { "crown_of_the_god_king": "found_journal_page" },
+  "flags": ["heard_the_stones"]
 }`;
 
 const GENESIS_SCHEMA_EXAMPLE = `{
@@ -182,15 +184,15 @@ ARRIVAL BEAT:
 
 SINCE_LAST_BEAT:
 - The block below shows everything the player has done since your last narration — every move, gather, craft, rest, even if no API call was made.
-- READ IT. Use it. Reference where the player has been. If they walked a long way, they are tired. If they have been gathering for hours, their pack is heavy.
+- READ IT. Use it. Reference where the player has been.
 - If the block is long, the player has been busy. Honor that.
 
 MAKE IT INTERESTING:
 - The island should feel alive, not procedural.
-- Reference recent tiles the player visited. If they saw a goat at (2,-1), maybe they find tracks here.
+- Reference recent tiles the player visited.
 - Reference the time of day, weather, and camp.
 - If nothing interesting happens, say so briefly and let the player move.
-- Do NOT force drama. Do NOT stuff every tile with a hook.
+- Do NOT force drama.
 
 CHOICES ARE PERSISTENT:
 - A location's choices are generated once and cached.
@@ -200,6 +202,11 @@ CHOICES ARE PERSISTENT:
 CHOICES MAY EXPIRE:
 - "expiresOnDay": integer. When day > expiresOnDay, the choice becomes a tombstone with "expired_label".
 - Mark "permanent": true on choices that are consumed when taken.
+
+THREAD PROGRESS:
+- If the player genuinely reached a story milestone, include it in "thread_progress" as { "thread_id": "milestone_text" }.
+- The engine uses this to advance the pacing and unlock later story beats.
+- Only include it when a milestone is truly reached, not for flavour.
 
 WEATHER IS GIVEN, NOT INVENTED:
 - The WEATHER block tells you today's weather.
@@ -271,15 +278,13 @@ ACTION BEAT:
 - The player just took an action. Narrate its outcome in one sentence.
 - Do NOT offer choices. The choices array must be empty.
 - Do NOT contradict the seed, the weather, or the current location.
-- If the action was boring, narrate it briefly and without drama.
 
 SINCE_LAST_BEAT:
-- The block below shows everything the player has done since your last narration.
-- Use it for continuity. Reference where they've been.
+- Use the block below for continuity. Reference where they've been.
 
 MAKE IT INTERESTING ONLY WHEN IT'S EARNED:
 - If the player has done something with consequence, reference it.
-- Cooking repeatedly at the same camp might attract animals nearby. Mention it if it feels right.
+- Cooking repeatedly at the same camp might attract animals nearby.
 - If nothing is worth remarking on, just describe the action.
 
 WEATHER IS GIVEN, NOT INVENTED.
@@ -324,16 +329,3 @@ Return valid json only.`;
 
   return { system, user };
 }
-
-// ---------------------------------------------------------------
-// 5. HISTORY FORMATTING
-// ---------------------------------------------------------------
-
-export function formatHistory(history) {
-  if (!history || history.length === 0) return '(no history yet)';
-  return history
-    .map(h => `${h.role === 'user' ? 'PLAYER' : 'GM'}: ${h.content}`)
-    .join('\n\n');
-}
-
-export const beatPrompts = arrivalBeatPrompts;
